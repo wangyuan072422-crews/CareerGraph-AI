@@ -1,80 +1,96 @@
 """
-Main entry point demonstrating correct checkpointer usage for DIRECT PYTHON EXECUTION.
+直接使用 Python 运行时，演示检查点存储正确用法的主入口。
 
-⚠️ IMPORTANT - DEPLOYMENT CONTEXT:
-This file is for running agents directly with Python (not langgraph dev/Studio).
-When running directly, you MUST pass a checkpointer to compile().
+重要提示 - 部署场景：
+此文件用于直接通过 Python 运行 Agent，而不是使用 langgraph dev/Studio。
+直接运行时，必须向 compile() 传入检查点存储。
 
-✅ This file: Direct Python execution → USE checkpointer
-❌ graphs/*.py: LangGraph Studio → NO checkpointer
+此文件：直接使用 Python 运行 → 使用检查点存储
+graphs/*.py：LangGraph Studio → 不传入检查点存储
   
-KEY POINTS:
-1. Thread ID is passed in config during invocation, NOT in state
-2. For direct Python: You MUST pass checkpointer (MemorySaver or MySQL)
-3. For LangGraph Studio: See graphs/multi_agent_system.py (no checkpointer)
+关键点：
+1. 调用时在线程配置中传入 thread ID，而不是放进状态
+2. 直接使用 Python 时，必须传入检查点存储（MemorySaver 或 MySQL）
+3. 使用 LangGraph Studio 时，参见 graphs/multi_agent_system.py（不传入检查点存储）
 """
+import argparse
 import uuid
+
 from langchain_core.messages import HumanMessage
-from agents.business_agent import create_business_agent_graph
-from agents.database_agent import create_database_agent_graph
-from utils.checkpointer import get_memory_saver, get_mysql_saver
+
+from utils.checkpointer import get_checkpointer
+from utils.env import load_environment
 
 # 建一张业务图 → 给它配一个 checkpointer → 用同一个 thread_id 连问三句 → 打印回答，顺便演示"换个 thread_id 就失忆"。
 
 def run_agent_with_memory(use_mysql: bool = False):
     """
-    Demonstrate correct usage of checkpointer with conversational memory.
+    演示如何正确使用检查点存储维护多轮对话记忆。
 
-    Args:
-        use_mysql: If True, use MySQL checkpointer. If False, use InMemorySaver.
+    参数：
+        use_mysql：为 True 时使用 MySQL 检查点存储；
+        为 False 时使用内存检查点存储。
     """
-    # Create the workflow
-    workflow = create_business_agent_graph()
+    load_environment()
+    from graphs.application import build_application_graph
 
-    # ✅ CORRECT FOR DIRECT PYTHON EXECUTION - PASS CHECKPOINTER
-    # This is different from graphs/multi_agent_system.py which is for Studio
-    if use_mysql:
-        # For MySQL: MUST pass checkpointer
-        print("Using MySQL Checkpointer")
-        checkpointer = get_mysql_saver("mysql://user:pass@localhost:3306/langgraph")
-        graph = workflow.compile(checkpointer=checkpointer)
-    else:
-        # For InMemory: Pass checkpointer for direct Python execution
-        print("Using InMemory Checkpointer")
-        checkpointer = get_memory_saver()
-        graph = workflow.compile(checkpointer=checkpointer)
+    backend = "mysql" if use_mysql else "memory"
+    print(f"Using {backend} Checkpointer")
+    checkpointer = get_checkpointer(backend)
 
-        # Note: For LangGraph Studio, you would NOT pass checkpointer
-        # See graphs/multi_agent_system.py for Studio usage
+    graph = build_application_graph(checkpointer=checkpointer)
 
-    # Create a thread ID for this conversation
-    # IMPORTANT: Thread ID goes in config, NOT in state
+    # 为本次对话创建线程 ID。
+    # 重要：线程 ID 放在配置中，而不是状态中。
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     print(f"\n=== Starting conversation with thread_id: {thread_id} ===\n")
 
-    # First query
-    print("Query 1: What are the key supply chain metrics?")
+    # 第一次查询。
+    print("Query 1: How should I structure a behavioral interview answer?")
     result1 = graph.invoke(
-        {"messages": [HumanMessage(content="What are the key supply chain metrics?")]},
-        config=config  # Thread ID is here!
+        {
+            "messages": [
+                HumanMessage(
+                    content="How should I structure a behavioral interview answer?"
+                )
+            ],
+            "forced_agent": None,
+            "status": "ok",
+            "error": None,
+        },
+        config=config
     )
     print(f"Response: {result1['messages'][-1].content}\n")
 
-    # Follow-up query - this should maintain context
-    print("Query 2: Can you explain the first one in more detail?")
+    # 后续查询：这里应当保留上下文。
+    print("Query 2: Can you give me an example of the second step?")
     result2 = graph.invoke(
-        {"messages": [HumanMessage(content="Can you explain the first one in more detail?")]},
-        config=config  # Same thread ID maintains context
+        {
+            "messages": [
+                HumanMessage(
+                    content="Can you give me an example of the second step?"
+                )
+            ],
+            "forced_agent": None,
+            "status": "ok",
+            "error": None,
+        },
+        config=config
     )
     print(f"Response: {result2['messages'][-1].content}\n")
 
-    # Another follow-up to verify context is maintained
-    print("Query 3: What about the others?")
+    # 再一次后续查询，用于验证上下文能够保持。
+    print("Query 3: How long should that answer be?")
     result3 = graph.invoke(
-        {"messages": [HumanMessage(content="What about the others?")]},
-        config=config  # Same thread ID
+        {
+            "messages": [HumanMessage(content="How long should that answer be?")],
+            "forced_agent": None,
+            "status": "ok",
+            "error": None,
+        },
+        config=config
     )
     print(f"Response: {result3['messages'][-1].content}\n")
 
@@ -86,31 +102,52 @@ def run_agent_with_memory(use_mysql: bool = False):
 # 换一个新thread_id 问一个和第三次一模一样的问题
 def demonstrate_new_conversation(graph, old_thread_id):
     """
-    Demonstrate that a new thread ID starts a fresh conversation.
+    演示新的线程 ID 会开启一段全新对话。
     """
     new_thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": new_thread_id}}
 
     print(f"\n=== New conversation with thread_id: {new_thread_id} ===\n")
-    print("Query: What about the others?")
+    print("Query: How long should that answer be?")
     result = graph.invoke(
-        {"messages": [HumanMessage(content="What about the others?")]},
+        {
+            "messages": [HumanMessage(content="How long should that answer be?")],
+            "forced_agent": None,
+            "status": "ok",
+            "error": None,
+        },
         config=config
     )
     print(f"Response: {result['messages'][-1].content}\n")
     print("Notice: The agent doesn't have context because it's a new thread_id")
 
 
-if __name__ == "__main__":
-    # Run with InMemory checkpointer
-    graph, thread_id = run_agent_with_memory(use_mysql=False)
+def _parse_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(
+        description="Run the multi-agent career assistant directly."
+    )
+    parser.add_argument(
+        "--mysql",
+        action="store_true",
+        help="Use the environment-configured MySQL checkpointer.",
+    )
+    return parser.parse_args(argv)
 
-    # Demonstrate new conversation
+
+def main(argv: list[str] | None = None):
+    args = _parse_args(argv)
+    graph, thread_id = run_agent_with_memory(use_mysql=args.mysql)
+
+    # 演示新对话。
     demonstrate_new_conversation(graph, thread_id)
 
     print("\n" + "="*60)
     print("To use MySQL checkpointer:")
-    print("1. Set up MySQL database")
-    print("2. Run: python main.py --mysql")
-    print("3. Update connection string in utils/checkpointer.py")
+    print("1. Create .env from .env.example")
+    print("2. Set CHECKPOINTER_BACKEND=mysql and valid MYSQL_* credentials")
+    print("3. Run: python main.py --mysql")
     print("="*60)
+
+
+if __name__ == "__main__":
+    main()

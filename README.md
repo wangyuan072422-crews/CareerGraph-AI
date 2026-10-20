@@ -1,719 +1,384 @@
-# LangGraph Multi-Agent System with Conversational Memory
+# 多智能体 AI 求职与面试助手
 
-This project demonstrates the **correct way** to build a LangGraph multi-agent system with conversational memory, addressing common issues with checkpointer configuration.
+这是一个面向 AI 应用开发岗位的 LangGraph 多智能体项目。用户可以通过 FastAPI
+提交求职、面试或求职申请数据问题，由 Supervisor 选择业务 Agent 或数据库 Agent，
+并使用独立的检查点数据库保存多轮会话状态。
 
-## ⚠️ CRITICAL: Checkpointer Usage Context
+项目当前聚焦以下能力：
 
-**The #1 mistake causing memory issues:**
+- Supervisor 自动路由，以及调用方指定 Agent 的手动路由。
+- Business Agent 使用 Chroma 本地向量索引和 Ollama embedding 做真实 RAG 检索。
+- Database Agent 通过固定的参数化只读工具查询求职申请数据，不执行模型生成的原始 SQL。
+- FastAPI 提供普通响应、SSE 流式响应、会话历史查询和会话删除。
+- LangGraph Checkpointer 支持内存模式与 MySQL 模式。
+- checkpoint 数据与业务数据使用不同的数据库配置和数据库账号。
 
-```python
-# ❌ WRONG - Using checkpointer with LangGraph Studio/Dev
-# In graphs/multi_agent_system.py:
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)  # DON'T DO THIS!
+## 架构
+
+```text
+HTTP Request
+    |
+    v
+FastAPI (api/server.py)
+    |
+    +-- /query         手动选择 business / database
+    +-- /query/auto    Supervisor 自动选择
+    +-- /query/stream  手动选择并返回 SSE
+    +-- /conversation  历史查询和删除
+    |
+    v
+graphs/application.py
+    |
+    +-- supervisor
+    |      |
+    |      +-- business_agent
+    |      +-- database_agent
+    |      +-- finish_handler
+    |      +-- error_handler
+    |
+    v
+ApplicationState + Checkpointer
+    |
+    +-- MemorySaver       进程内，仅适合开发和测试
+    +-- PyMySQLSaver      MySQL checkpoint 表，跨进程恢复
+
+Business Agent
+    -> Chroma PersistentClient
+    -> Ollama bge-m3 embedding
+    -> data/career_knowledge/*.md
+
+Database Agent
+    -> search_job_applications
+    -> career_app 只读账号
+    -> career_assistant.job_applications
 ```
 
-**The correct approach depends on HOW you're running:**
+## 目录
 
-| Context | Checkpointer? | Why? |
-|---------|--------------|------|
-| **LangGraph Studio** (`langgraph dev`) | ❌ **NO** | Studio has built-in persistence |
-| **Production** (FastAPI/Python) | ✅ **YES** | You manage persistence |
-
-```python
-# ✅ CORRECT - For LangGraph Studio
-# In graphs/multi_agent_system.py:
-graph = workflow.compile()  # No checkpointer - Studio handles it
-
-# ✅ CORRECT - For Production
-# In main.py or api/server.py:
-checkpointer = MemorySaver()  # or PyMySQLSaver for production
-graph = workflow.compile(checkpointer=checkpointer)
+```text
+agents/
+  business_agent/       求职知识 RAG 与业务回答
+  database_agent/       只读求职申请查询工具与 Agent 节点
+  supervisor/           结构化路由和降级处理
+graphs/
+  application.py        共享应用图工厂
+  state.py              ApplicationState 定义
+  multi_agent_system.py LangGraph Studio 入口
+api/
+  server.py             FastAPI 接口层
+utils/
+  checkpointer.py       MemorySaver / PyMySQLSaver 选择与连接管理
+  env.py                .env 加载
+  llm.py                Ollama 聊天模型工厂
+data/
+  career_knowledge/     Markdown 求职知识文档
+  chroma/               本地 Chroma 索引，运行时生成
+scripts/
+  ingest_knowledge.py    构建或更新 Chroma 索引
+  init_business_db.sql   创建业务库、表和幂等演示数据
+tests/                   确定性测试和可选真实集成测试
+examples/                Python 与 API 使用示例
 ```
 
-**See Section "Checkpointer Configuration" below for complete details.**
+## 环境要求
 
----
+- Python 3.10 或更高版本
+- Ollama
+- MySQL 8.x
+- 可选：Docker / Docker Compose
 
-## 🎯 Key Issues Solved
+项目实际使用两个独立数据库：
 
-Based on real-world implementation challenges:
+| 数据 | 默认数据库 | 默认账号 | 用途 |
+| --- | --- | --- | --- |
+| LangGraph checkpoint | `langgraph_db` | `langgraph_user` | 图状态、消息历史、会话快照 |
+| 求职业务数据 | `career_assistant` | `career_app` | `job_applications` 只读查询 |
 
-1. **✓ Error: "LangGraph already has inbuilt Memory saver" when using Studio**
-   - Solution: Don't pass checkpointer when using `langgraph dev`
+不要把业务库写权限授予 `career_app`。checkpoint 表由
+`PyMySQLSaver.setup()` 自动初始化。
 
-2. **✓ Context not retained between follow-up questions**
-   - Solution: Use `add_messages` reducer in state and pass `thread_id` in config (not state)
+## 最短启动流程
 
-3. **✓ Confusion about when to use checkpointer**
-   - Solution: Studio = no checkpointer, Production = yes checkpointer
+在项目根目录执行：
 
-4. **✓ Uncertain about thread_id placement**
-   - Solution: thread_id goes in `config`, not in `state`
-
-## 📁 Project Structure
-
-```
-langgraph_multi_agent/
-├── agents/
-│   ├── business_agent/       # Handles business KB queries
-│   │   ├── __init__.py
-│   │   ├── state.py          # State with add_messages reducer
-│   │   └── agent.py          # Agent graph definition
-│   ├── database_agent/       # Handles structured data queries
-│   │   ├── __init__.py
-│   │   ├── state.py
-│   │   └── agent.py
-│   └── supervisor/           # Routes between agents
-│       ├── __init__.py
-│       ├── state.py
-│       └── agent.py
-├── graphs/                   # LangGraph Studio entry point
-│   ├── __init__.py
-│   └── multi_agent_system.py # Unified graph with all agents
-├── api/
-│   └── server.py             # FastAPI server for remote graph invocation
-├── utils/
-│   └── checkpointer.py       # Checkpointer configuration utilities
-├── examples/
-│   ├── mysql_example.py      # MySQL checkpointer examples
-│   └── api_client_example.py # API client examples
-├── langgraph.json            # LangGraph Studio configuration
-├── main.py                   # Main entry point
-├── test_checkpointer.py      # Automated tests
-└── README.md
-```
-
-## 🚀 Quick Start
-
-### 1. Installation
-
-```bash
-cd langgraph_multi_agent
-
-# Install dependencies
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# Or install manually:
-pip install langgraph langchain-openai fastapi uvicorn requests langgraph-cli
-
-# For MySQL support (optional)
-pip install langgraph-checkpoint-mysql pymysql
+Copy-Item .env.example .env
 ```
 
-### 2. Set Environment Variables
+编辑 `.env`，填入本机密码和模型配置。至少确认：
 
-```bash
-export OPENAI_API_KEY="your-api-key-here"
+```dotenv
+CHECKPOINTER_BACKEND=mysql
+MYSQL_HOST=localhost
+MYSQL_USER=langgraph_user
+MYSQL_PASSWORD=你的-checkpoint-密码
+MYSQL_DATABASE=langgraph_db
+
+BUSINESS_DB_HOST=localhost
+BUSINESS_DB_USER=career_app
+BUSINESS_DB_PASSWORD=你的只读账号密码
+BUSINESS_DB_DATABASE=career_assistant
+
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_CHAT_MODEL=qwen2.5-coder:7b
+OLLAMA_EMBEDDING_MODEL=bge-m3:latest
 ```
 
-### 3. Run the Basic Example
+启动 Ollama 并准备模型：
 
-```bash
-# Run with InMemory checkpointer
-python main.py
+```powershell
+ollama pull qwen2.5-coder:7b
+ollama pull bge-m3:latest
 ```
 
-### 4. Run the API Server
+用 MySQL 管理员账号初始化业务库和演示数据：
 
-```bash
-# Start server (run as module from project root)
-python -m api.server
-
-# Or with uvicorn directly
-uvicorn api.server:app --host 0.0.0.0 --port 8000
-
-# In another terminal, run the client examples
-python examples/api_client_example.py
+```powershell
+mysql -u root -p < scripts/init_business_db.sql
 ```
 
-### 5. Run with LangGraph Studio (Visual Development)
+初始化 Chroma 索引：
 
-```bash
-# Install LangGraph CLI
-pip install langgraph-cli
-
-# Start LangGraph Studio
-langgraph dev
-
-# Open your browser to http://localhost:8123
-# You'll see all three agents available:
-# - business_agent
-# - database_agent
-# - supervisor
+```powershell
+.\.venv\Scripts\python.exe scripts\ingest_knowledge.py
 ```
 
-**LangGraph Studio Features**:
-- 🎨 Visual graph representation
-- 💬 Interactive chat interface with agents
-- 🔍 Step-by-step execution debugging
-- 📊 State inspection at each node
-- 🔄 Thread management and conversation history
-- ⏱️ Time-travel debugging (replay conversations)
+启动 API：
 
-## 🔑 Critical Concepts
-
-### 1. State Definition with add_messages Reducer
-
-**❌ WRONG:**
-```python
-class State(TypedDict):
-    messages: list[BaseMessage]  # Won't maintain conversation properly
+```powershell
+.\.venv\Scripts\python.exe -m api.server
 ```
 
-**✓ CORRECT:**
-```python
-from typing import Annotated
-from langgraph.graph.message import add_messages
-from langchain_core.messages import BaseMessage
+打开 `http://127.0.0.1:8000/docs` 查看接口。
 
-class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]  # ✓ Correct!
-```
+## API
 
-The `add_messages` reducer:
-- Appends new messages to the list
-- Handles message deduplication by ID
-- Maintains conversation history properly
+### 手动路由：`POST /query`
 
-### 2. Checkpointer Configuration
-
-**⚠️ CRITICAL:** Checkpointer usage depends on your deployment context.
-
-#### Context 1: LangGraph Studio (`langgraph dev`)
-
-**Use Case:** Local development with Studio UI
-
-**✅ CORRECT - No Checkpointer:**
-```python
-# In graphs/multi_agent_system.py (loaded by Studio)
-
-workflow = create_business_agent_graph()
-
-# DO NOT pass checkpointer - Studio provides persistence
-graph = workflow.compile()
-
-# Export for Studio
-__all__ = ["graph"]
-```
-
-**❌ WRONG - With Checkpointer:**
-```python
-# DON'T DO THIS in files loaded by langgraph dev!
-from langgraph.checkpoint.memory import MemorySaver
-
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)  # ❌ Conflicts with Studio!
-```
-
-**Why:** LangGraph Studio has its own built-in persistence layer. Passing a checkpointer creates a conflict and causes errors like "LangGraph already has inbuilt Memory saver".
-
----
-
-#### Context 2: Direct Python Execution (Development/Testing)
-
-**Use Case:** Running with `python main.py` or in notebooks
-
-**✅ CORRECT - With MemorySaver:**
-```python
-# In main.py or your script
-
-from langgraph.checkpoint.memory import MemorySaver
-
-workflow = create_business_agent_graph()
-
-# DO pass checkpointer for programmatic use
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)
-```
-
-**Why:** When running directly (not via Studio), you need to explicitly provide a checkpointer for persistence.
-
----
-
-#### Context 3: Production Deployment (FastAPI/Server)
-
-**Use Case:** Production deployment with persistent storage
-
-**✅ CORRECT - With PyMySQLSaver:**
-```python
-# In api/server.py or production main.py
-
-from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
-
-workflow = create_business_agent_graph()
-
-# MUST pass checkpointer for production persistence
-checkpointer = PyMySQLSaver.from_conn_string(
-    "mysql://user:password@host:port/database"
-)
-graph = workflow.compile(checkpointer=checkpointer)
-```
-
-**✅ CORRECT - With MemorySaver (for testing production setup):**
-```python
-from langgraph.checkpoint.memory import MemorySaver
-
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)
-```
-
-**Why:** Production needs explicit persistence that survives server restarts (MySQL) or at minimum provides in-memory persistence.
-
----
-
-#### Summary Table
-
-| Deployment Context | File Location | Checkpointer? | Reason |
-|-------------------|---------------|---------------|---------|
-| **LangGraph Studio** | `graphs/*.py` | ❌ NO | Studio provides it |
-| **Direct Python** | `main.py` | ✅ YES (MemorySaver) | You manage persistence |
-| **Production API** | `api/server.py` | ✅ YES (MySQL/Memory) | You manage persistence |
-
----
-
-#### Common Mistakes
-
-**❌ Mistake 1: Using checkpointer with Studio**
-```python
-# graphs/multi_agent_system.py
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)  # ❌ Studio already has one!
-# Run: langgraph dev
-# Result: Error/warning about built-in memory saver
-```
-
-**❌ Mistake 2: Not using checkpointer in production**
-```python
-# api/server.py
-graph = workflow.compile()  # ❌ No persistence in production!
-# Result: Memory lost on server restart, no conversation history
-```
-
-**✅ Solution: Separate compilation for different contexts**
-```python
-# graphs/multi_agent_system.py (for Studio)
-def create_graph():
-    workflow = create_business_agent_graph()
-    return workflow  # Return uncompiled
-
-graph = create_graph().compile()  # No checkpointer
-
-# api/server.py (for Production)
-from graphs.multi_agent_system import create_graph
-from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
-
-workflow = create_graph()
-checkpointer = PyMySQLSaver.from_conn_string(...)
-graph = workflow.compile(checkpointer=checkpointer)  # With checkpointer
-```
-
-### 3. Thread ID Placement
-
-**❌ WRONG - thread_id in state:**
-```python
-result = graph.invoke({
-    "messages": [HumanMessage(content="Hello")],
-    "thread_id": "123"  # ❌ Won't work!
-})
-```
-
-**✓ CORRECT - thread_id in config:**
-```python
-config = {"configurable": {"thread_id": "123"}}
-result = graph.invoke(
-    {"messages": [HumanMessage(content="Hello")]},
-    config=config  # ✓ Correct!
-)
-```
-
-### 4. Maintaining Conversation Context
-
-```python
-import uuid
-from langchain_core.messages import HumanMessage
-
-# Create thread for conversation
-thread_id = str(uuid.uuid4())
-config = {"configurable": {"thread_id": thread_id}}
-
-# First query
-result1 = graph.invoke(
-    {"messages": [HumanMessage(content="What is supply chain?")]},
-    config=config
-)
-
-# Follow-up query - SAME thread_id maintains context
-result2 = graph.invoke(
-    {"messages": [HumanMessage(content="Tell me more about the first point")]},
-    config=config  # ✓ Agent has context from previous message
-)
-
-# New conversation - DIFFERENT thread_id
-new_thread_id = str(uuid.uuid4())
-new_config = {"configurable": {"thread_id": new_thread_id}}
-
-result3 = graph.invoke(
-    {"messages": [HumanMessage(content="Tell me more about the first point")]},
-    config=new_config  # ✗ No context (different thread)
-)
-```
-
-## 🎨 LangGraph Studio
-
-LangGraph Studio provides a visual interface for developing, debugging, and testing your agents. It's the easiest way to interact with your graphs.
-
-### Starting LangGraph Studio
-
-```bash
-# Make sure you're in the project directory
-cd langgraph_multi_agent
-
-# Set your OpenAI API key
-export OPENAI_API_KEY="your-key-here"
-
-# Start LangGraph Studio
-langgraph dev
-```
-
-The studio will start on `http://localhost:8123`
-
-### The Multi-Agent System
-
-The `langgraph.json` configuration exposes a unified **multi_agent_system** graph that shows all three agents working together:
-
-- **supervisor** - Routes queries to the appropriate specialized agent
-- **business_agent** - Handles business processes, policies, and KB queries
-- **database_agent** - Handles structured data and SQL queries
-
-This unified view lets you see the complete architecture and watch routing decisions in real-time!
-
-### Using the Studio
-
-**1. The Graph**
-- You'll see the **multi_agent_system** with all three agents
-
-**2. Visual Graph View**
-- See the agent's node structure
-- Understand the flow of execution
-- Inspect state at each step
-
-**3. Interactive Chat**
-- Type queries in the chat interface
-- Watch the agent process your request
-- See intermediate steps and reasoning
-
-**4. Thread Management**
-- Create new conversation threads
-- Switch between threads
-- Each thread maintains separate context
-
-**5. State Inspection**
-- View the full state at any point
-- See all messages in the conversation
-- Inspect checkpointer data
-
-**6. Time Travel Debugging**
-- Replay conversations step-by-step
-- Fork from any point in the conversation
-- Test different paths
-
-### Example Workflow
-
-```bash
-# 1. Start the studio
-langgraph dev
-
-# 2. Open http://localhost:8123 in your browser
-
-# 3. Select "multi_agent_system" (shows all agents)
-
-# 4. Try these queries to see routing in action:
-#    - "What are the top supply chain metrics?" → Routes to business_agent
-#    - "Show me sales data from last month" → Routes to database_agent
-#    - "Explain the second metric in detail" → Uses context, stays with business
-
-# 5. Watch the visual graph:
-#    - See the supervisor node route to the appropriate agent
-#    - Watch agents process and respond
-#    - Observe routing decisions in real-time
-
-# 6. Click on any node to see the state at that point
-
-# 7. Use "New Thread" to start a fresh conversation
-```
-
-### Configuration
-
-The `langgraph.json` file configures LangGraph Studio:
+请求：
 
 ```json
 {
-  "dependencies": ["."],
-  "graphs": {
-    "multi_agent_system": "./graphs/multi_agent_system.py:graph"
-  },
-  "env": ".env"
+  "message": "帮我制定一个行为面试准备计划",
+  "thread_id": "可选；不传时服务端生成",
+  "agent_type": "business"
 }
 ```
 
-- **dependencies**: Python packages to install
-- **graphs**: Graph entry points (file:variable format)
-- **env**: Environment file for API keys
+`agent_type` 只允许 `business` 或 `database`。省略时默认是 `business`。
 
-**Important Note on Checkpointers**:
-- ✅ **LangGraph Studio**: Graphs compile WITHOUT checkpointer (Studio provides persistence)
-- ✅ **FastAPI/Code**: Graphs compile WITH checkpointer (you manage persistence)
+### 自动路由：`POST /query/auto`
 
-The `graphs/` folder exports graphs without checkpointers for Studio use. For programmatic use (like `api/server.py`), compile with your chosen checkpointer.
+请求：
 
-### Troubleshooting
-
-**Port already in use:**
-```bash
-langgraph dev --port 8124
-```
-
-**Can't find graphs:**
-- Ensure you're in the project root directory
-- Check that all graph files exist in `graphs/` folder
-- Verify imports work: `python -c "from graphs.business_graph import graph"`
-
-**API key errors:**
-- Make sure OPENAI_API_KEY is set: `echo $OPENAI_API_KEY`
-- Or create a `.env` file with `OPENAI_API_KEY=your-key`
-
-## 🌐 API Usage
-
-### Start the Server
-
-```bash
-# Run as module from project root
-python -m api.server
-
-# Or with uvicorn
-uvicorn api.server:app --host 0.0.0.0 --port 8000
-```
-
-API docs available at: http://localhost:8000/docs
-
-### Two Routing Modes
-
-The API server supports both automatic and manual routing:
-
-#### 1. Automatic Routing (⭐ Recommended)
-
-The supervisor analyzes the query and routes automatically (same as LangGraph Studio):
-
-```bash
-curl -X POST http://localhost:8000/query/auto \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "What are supply chain best practices?"
-  }'
-```
-
-Response:
 ```json
 {
-  "response": "Supply chain best practices include...",
-  "thread_id": "550e8400-e29b-41d4-a716-446655440000",
-  "agent_type": "business_agent"
+  "message": "我目前有哪些求职申请正在面试？",
+  "thread_id": "可选；不传时服务端生成"
 }
 ```
 
-**Benefits:**
-- ✅ Intelligent routing based on query content
-- ✅ Same behavior as LangGraph Studio
-- ✅ No need to specify agent type
+Supervisor 根据问题选择 `business_agent`、`database_agent` 或 `finish`。
+自动接口不接受 `agent_type`。
 
-#### 2. Manual Routing
+### 统一响应
 
-Client specifies which agent to use:
-
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "What are supply chain best practices?",
-    "agent_type": "business"
-  }'
+```json
+{
+  "response": "最终回答",
+  "thread_id": "会话 ID",
+  "agent_type": "business",
+  "status": "ok",
+  "error": null
+}
 ```
 
-**Use cases:**
-- Direct control over routing
-- Testing specific agents
-- UI with explicit agent selection
+`status` 可能是 `ok`、`degraded` 或 `error`。`degraded` 表示路由或某个
+可恢复环节失败后使用了安全兜底；`error` 表示执行在错误边界停止。
 
-### Continue Conversation
+### SSE：`POST /query/stream`
 
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Can you explain the first one?",
-    "thread_id": "550e8400-e29b-41d4-a716-446655440000",
-    "agent_type": "business"
-  }'
+该接口使用手动路由字段。响应类型为 `text/event-stream`：
+
+```text
+event: update
+data: {"business_agent": {...}}
+
+event: final
+data: {"response":"...","thread_id":"...","agent_type":"business","status":"ok","error":null}
 ```
 
-### Get Conversation History
+图节点异常时发送安全的 `event: error`。流结束后，服务端从同一张图和同一个
+`thread_id` 读取最终状态，再发送 `event: final`。
 
-```bash
-curl http://localhost:8000/conversation/550e8400-e29b-41d4-a716-446655440000?agent_type=business
+### 历史与删除
+
+```text
+GET    /conversation/{thread_id}
+DELETE /conversation/{thread_id}
 ```
 
-## 🔧 MySQL Setup (Production)
+删除操作调用当前 checkpointer 的 `delete_thread()`。内存模式只能删除当前进程
+中的数据；MySQL 模式删除持久化 checkpoint。
 
-### 1. Install MySQL
+## RAG 的实际流程
 
-```bash
-# macOS
-brew install mysql
-brew services start mysql
+1. `scripts/ingest_knowledge.py` 读取 `data/career_knowledge/**/*.md`。
+2. `agents/business_agent/retriever.py` 按 Markdown 段落切块。
+3. 使用 Ollama `bge-m3` 为 chunk 生成 embedding。
+4. 使用稳定的 chunk ID 执行 Chroma upsert，因此重复入库是幂等的。
+5. Business Agent 只使用本轮用户问题检索 top-k passage。
+6. 检索内容和 `source`、`title` 注入业务 Prompt，回答末尾附带来源。
+7. 索引为空或 embedding 失败时不会静默回退到关键词检索。
 
-# Ubuntu/Debian
-sudo apt-get install mysql-server
-sudo systemctl start mysql
+Chroma 默认持久化到 `data/chroma`。更新知识文档后重新执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\ingest_knowledge.py
 ```
 
-### 2. Create Database
+需要完全重建时：
 
-```sql
-mysql -u root -p
-
-CREATE DATABASE langgraph_db;
-CREATE USER 'langgraph_user'@'localhost' IDENTIFIED BY 'your_password';
-GRANT ALL PRIVILEGES ON langgraph_db.* TO 'langgraph_user'@'localhost';
-FLUSH PRIVILEGES;
+```powershell
+.\.venv\Scripts\python.exe scripts\ingest_knowledge.py --rebuild
 ```
 
-### 3. Update Connection String
+## 数据库 Agent 工具
 
-In `utils/checkpointer.py`:
+Database Agent 只绑定 `search_job_applications`：
+
+```text
+status
+company
+role_keyword
+limit
+```
+
+工具使用固定 `SELECT`、参数化筛选和 `LIMIT`，不会执行模型生成的原始 SQL。
+如果模型没有产生 tool call，Database Agent 不会伪造数据库结果；如果查询失败，
+工具返回安全错误，最终回答应明确说明实时记录不可用。
+
+初始化脚本可以重复执行，演示数据按公司、岗位和申请时间检查后再插入，不会删除
+已有记录，也不会重复写入同一批 seed 数据。
+
+## Checkpointer 配置
+
+### 内存模式
+
+```dotenv
+CHECKPOINTER_BACKEND=memory
+```
+
+适合确定性测试和单进程开发。进程重启后历史消失。
+
+### MySQL 模式
+
+```dotenv
+CHECKPOINTER_BACKEND=mysql
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=langgraph_user
+MYSQL_PASSWORD=你的密码
+MYSQL_DATABASE=langgraph_db
+```
+
+也可以提供已经 URL 编码的 `MYSQL_URL`。API、直接 Python 运行和示例共用
+`utils.checkpointer.get_checkpointer()`，不会在接口内部另建 checkpointer。
+
+`thread_id` 必须放在 LangGraph config：
+
 ```python
-connection_string = "mysql://langgraph_user:your_password@localhost:3306/langgraph_db"
-```
-
-### 4. Run with MySQL
-
-```python
-from utils.checkpointer import get_mysql_saver
-from agents.business_agent import create_business_agent_graph
-
-checkpointer = get_mysql_saver()
-workflow = create_business_agent_graph()
-graph = workflow.compile(checkpointer=checkpointer)
-```
-
-## 📚 Examples
-
-### Example 1: Basic Conversation
-
-```python
-from main import run_agent_with_memory
-
-# Run with InMemory checkpointer
-graph, thread_id = run_agent_with_memory(use_mysql=False)
-```
-
-### Example 2: MySQL Checkpointer
-
-```python
-# See examples/mysql_example.py
-python examples/mysql_example.py
-```
-
-### Example 3: API Client
-
-```python
-# See examples/api_client_example.py
-python examples/api_client_example.py
-```
-
-## 🐛 Common Issues and Solutions
-
-### Issue 1: "LangGraph already has inbuilt Memory saver"
-
-**Cause:** Passing `MemorySaver` to `compile()` unnecessarily
-
-**Solution:**
-```python
-# Option 1: Don't pass anything
-graph = workflow.compile()
-
-# Option 2: Pass for shared memory
-checkpointer = MemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)
-```
-
-### Issue 2: Context Not Maintained
-
-**Cause:** Not using `add_messages` reducer or not passing `thread_id`
-
-**Solution:**
-```python
-# 1. Use add_messages reducer in state
-from langgraph.graph.message import add_messages
-
-class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-
-# 2. Pass thread_id in config
 config = {"configurable": {"thread_id": thread_id}}
-graph.invoke(input, config=config)
 ```
 
-### Issue 3: MySQL Connection Error
+它不是 `ApplicationState` 字段。
 
-**Cause:** Incorrect connection string or database not created
+## LangGraph Studio
 
-**Solution:**
-1. Verify MySQL is running: `mysql -u root -p`
-2. Check database exists: `SHOW DATABASES;`
-3. Verify connection string format:
-   ```
-   mysql://username:password@host:port/database
-   ```
+`graphs/multi_agent_system.py` 故意不传入 checkpointer，由 Studio 管理运行时持久化：
 
-## 🏗️ Architecture Decisions
+```powershell
+langgraph dev
+```
 
-### Why Separate Agent Files?
+Studio 和 FastAPI 使用同一张 `build_application_graph()` 构造的图，但各自管理
+持久化边界。
 
-- **Modularity**: Each agent is self-contained
-- **Scalability**: Easy to add new agents
-- **Testing**: Test agents independently
-- **Deployment**: Deploy agents separately if needed
+## 测试与验收
 
-### Why Not Compile in Agent Files?
+### 默认测试
 
-Agents return uncompiled workflows so the parent can:
-- Choose appropriate checkpointer (Memory vs MySQL)
-- Configure compilation options
-- Compose multiple agents together
+不访问 MySQL 或 Ollama：
 
-### Why FastAPI?
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+```
 
-- **Standard**: Industry-standard Python web framework
-- **Async**: Built-in async support for streaming
-- **Docs**: Auto-generated API documentation
-- **Remote**: Enables remote graph invocation
+### MySQL checkpoint 真实集成测试
 
-## 📖 Additional Resources
+需要当前 `.env` 中的 MySQL 可用：
 
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
-- [LangGraph Checkpointer Guide](https://langchain-ai.github.io/langgraph/how-tos/persistence/)
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [MySQL Checkpointer](https://github.com/langchain-ai/langgraph/tree/main/libs/checkpoint-mysql)
+```powershell
+$env:RUN_MYSQL_INTEGRATION = "1"
+.\.venv\Scripts\python.exe -m unittest -v tests.test_mysql_integration
+```
 
-## 🤝 Contributing
+该测试会写入随机 `thread_id`，通过子进程重新连接 MySQL 恢复状态，然后调用
+`delete_thread()` 验证历史消失，并检查 checkpoint 表 collation。
 
-This example was built to address real-world implementation challenges. If you encounter issues or have suggestions, please open an issue.
+### Chroma + Ollama 真实检索测试
 
-## 📝 License
+需要 Ollama 和 `bge-m3:latest` 可用：
 
-MIT License - feel free to use this as a template for your own projects.
+```powershell
+$env:RUN_RAG_INTEGRATION = "1"
+.\.venv\Scripts\python.exe -m unittest -v tests.test_business_retriever
+```
 
----
+### 编译和补丁检查
 
-**Built with ❤️ to help developers avoid common LangGraph pitfalls**
+```powershell
+.\.venv\Scripts\python.exe -m compileall .
+git diff --check
+```
+
+真实模型是否产生数据库 tool call，取决于当前 Ollama 模型和运行时行为。
+确定性测试通过不能替代真实 Ollama、MySQL 或 HTTP 端到端验收。
+
+## 示例
+
+```powershell
+# 直接运行统一图，默认演示多轮上下文
+.\.venv\Scripts\python.exe main.py
+
+# 使用当前 .env 中的 MySQL checkpoint
+.\.venv\Scripts\python.exe main.py --mysql
+
+# 调用 API 的手动、自动、流式、历史与删除接口
+.\.venv\Scripts\python.exe examples\api_client_example.py
+```
+
+## Docker
+
+`Dockerfile` 只构建应用服务。MySQL 和 Ollama 仍由外部服务提供。
+
+```powershell
+docker compose up --build
+```
+
+默认通过 `host.docker.internal` 访问宿主机服务。若 MySQL 或 Ollama 运行在
+其他地址，在 `.env` 或 shell 中设置对应的 Docker 覆盖变量。
+
+Docker 配置已提供，但当前机器没有 Docker 命令，因此未本机实测。
+
+## 已知边界
+
+- Ollama 的 Supervisor 路由和 Database Agent tool calling 可能受模型规模、
+  Prompt 和本机推理状态影响，不能把一次成功当成稳定生产保证。
+- Chroma 索引需要显式构建；API 启动不会自动重新 embedding 全部文档。
+- 当前没有上传文档、用户鉴权、审批流和多租户隔离。
+- 当前测试覆盖图结构、路由降级、RAG 接口约定和工具参数化；真实模型和真实
+  数据库需要在目标环境单独验收。

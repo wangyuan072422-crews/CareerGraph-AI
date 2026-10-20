@@ -1,0 +1,17 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      MYSQL_HOST: ${DOCKER_MYSQL_HOST:-host.docker.internal}
+      BUSINESS_DB_HOST: ${DOCKER_BUSINESS_DB_HOST:-host.docker.internal}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./data/chroma:/app/data/chroma

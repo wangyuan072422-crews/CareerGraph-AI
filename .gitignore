@@ -57,3 +57,6 @@ STRUCTURE_VERIFICATION.md
 
 # LangGraph
 .langgraph_api/
+
+# Local vector index
+data/chroma/

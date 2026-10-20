@@ -1,6 +1,6 @@
 """
-Test script to verify checkpointer configuration and conversational memory.
-This demonstrates the solutions to all the issues discussed in the video.
+用于验证检查点存储配置和多轮对话记忆的测试脚本。
+本脚本演示视频中讨论的各项问题的解决方案。
 """
 import uuid
 import os
@@ -11,11 +11,11 @@ from utils.checkpointer import get_memory_saver
 
 def test_without_checkpointer():
     """
-    Test 1: Compile without passing checkpointer (uses built-in).
-    This is the CORRECT way to avoid the warning.
+    测试 1：编译时不传入检查点存储（使用内置实现）。
+    这是避免出现警告的正确方式。
 
-    Note: To use get_state(), we need to pass checkpointer explicitly.
-    But for normal usage, you can compile() without it.
+    注意：使用 get_state() 时需要显式传入检查点存储。
+    但在普通使用场景中，可以不传入检查点存储直接调用 compile()。
     """
     print("\n" + "="*60)
     print("TEST 1: Compile without checkpointer (built-in MemorySaver)")
@@ -23,8 +23,8 @@ def test_without_checkpointer():
 
     workflow = create_business_agent_graph()
 
-    # For this test, we'll pass checkpointer to enable get_state()
-    # In real usage, you can just do: graph = workflow.compile()
+    # 本测试会传入检查点存储，以便调用 get_state()。
+    # 实际使用时也可以直接执行：graph = workflow.compile()
     checkpointer = get_memory_saver()
     graph = workflow.compile(checkpointer=checkpointer)
 
@@ -45,7 +45,7 @@ def test_without_checkpointer():
     )
     print(f"Response: {result2['messages'][-1].content[:80]}...")
 
-    # Check message count - should have 4 messages (2 user + 2 assistant)
+    # 检查消息数量：应当有 4 条消息（2 条用户消息和 2 条助手消息）。
     state = graph.get_state(config)
     msg_count = len(state.values.get("messages", []))
 
@@ -59,8 +59,8 @@ def test_without_checkpointer():
 
 def test_with_explicit_checkpointer():
     """
-    Test 2: Compile with explicit MemorySaver for shared memory.
-    This is useful when you want to share memory across multiple graph instances.
+    测试 2：使用显式传入的 MemorySaver 共享记忆。
+    当需要在多个图实例之间共享记忆时，这种方式很有用。
     """
     print("\n" + "="*60)
     print("TEST 2: Compile with explicit MemorySaver (shared memory)")
@@ -68,7 +68,7 @@ def test_with_explicit_checkpointer():
 
     workflow = create_business_agent_graph()
 
-    # Create explicit checkpointer
+    # 创建显式检查点存储。
     checkpointer = get_memory_saver()
     graph = workflow.compile(checkpointer=checkpointer)
 
@@ -89,7 +89,7 @@ def test_with_explicit_checkpointer():
     )
     print(f"Response: {result2['messages'][-1].content[:80]}...")
 
-    # Verify context
+    # 验证上下文。
     if "inventor" in result2['messages'][-1].content.lower():
         print("\n✓ SUCCESS: Context maintained with explicit checkpointer!")
     else:
@@ -100,7 +100,7 @@ def test_with_explicit_checkpointer():
 
 def test_thread_isolation():
     """
-    Test 3: Verify that different thread_ids maintain separate conversations.
+    测试 3：验证不同的 thread_id 会维护彼此独立的对话。
     """
     print("\n" + "="*60)
     print("TEST 3: Thread Isolation (separate conversations)")
@@ -110,7 +110,7 @@ def test_thread_isolation():
     checkpointer = get_memory_saver()
     graph = workflow.compile(checkpointer=checkpointer)
 
-    # Thread 1
+    # 线程 1。
     thread1_id = str(uuid.uuid4())
     config1 = {"configurable": {"thread_id": thread1_id}}
 
@@ -121,7 +121,7 @@ def test_thread_isolation():
     )
     print(f"Response: {result1['messages'][-1].content[:60]}...")
 
-    # Thread 2 - different conversation
+    # 线程 2：另一段对话。
     thread2_id = str(uuid.uuid4())
     config2 = {"configurable": {"thread_id": thread2_id}}
 
@@ -132,7 +132,7 @@ def test_thread_isolation():
     )
     print(f"Response: {result2['messages'][-1].content[:60]}...")
 
-    # Back to Thread 1 - should remember logistics context
+    # 回到线程 1：这里应当记住物流相关的上下文。
     print(f"\nThread 1 ({thread1_id[:8]}...): Follow up with 'Tell me more'")
     result3 = graph.invoke(
         {"messages": [HumanMessage(content="Tell me more about it")]},
@@ -140,7 +140,7 @@ def test_thread_isolation():
     )
     print(f"Response: {result3['messages'][-1].content[:60]}...")
 
-    # Check message counts to verify thread isolation
+    # 检查消息数量，验证线程隔离。
     state1 = graph.get_state(config1)
     state2 = graph.get_state(config2)
 
@@ -160,7 +160,7 @@ def test_thread_isolation():
 
 def test_state_structure():
     """
-    Test 4: Verify state structure with add_messages reducer.
+    测试 4：验证使用 add_messages reducer 的状态结构。
     """
     print("\n" + "="*60)
     print("TEST 4: State Structure (add_messages reducer)")
@@ -168,14 +168,14 @@ def test_state_structure():
 
     workflow = create_business_agent_graph()
 
-    # Need to pass checkpointer explicitly to use get_state()
+    # 需要显式传入检查点存储，才能使用 get_state()。
     checkpointer = get_memory_saver()
     graph = workflow.compile(checkpointer=checkpointer)
 
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Multiple interactions
+    # 多次交互。
     messages_to_send = [
         "Hello, I need help with supply chain",
         "What are the main challenges?",
@@ -190,7 +190,7 @@ def test_state_structure():
         )
         print(f"Response: {result['messages'][-1].content[:50]}...")
 
-    # Get final state to verify message accumulation
+    # 获取最终状态，验证消息累积。
     state = graph.get_state(config)
     total_messages = len(state.values.get("messages", []))
 
@@ -207,7 +207,7 @@ def test_state_structure():
 
 def test_supervisor_routing():
     """
-    Test 5: Verify supervisor routing with multi-agent system.
+    测试 5：验证多智能体系统中的 Supervisor 路由。
     """
     print("\n" + "="*60)
     print("TEST 5: Supervisor Routing (Multi-Agent System)")
@@ -229,7 +229,7 @@ def test_supervisor_routing():
         else:
             return "__end__"
 
-    # Create multi-agent system
+    # 创建多智能体系统。
     supervisor_workflow = create_supervisor_graph()
     business_workflow = create_business_agent_graph()
     database_workflow = create_database_agent_graph()
@@ -277,7 +277,7 @@ def test_supervisor_routing():
     print(f"Response: {result2['messages'][-1].content[:60]}...")
     print(f"Routed to: {result2.get('next', 'unknown')}")
 
-    # Verify routing happened
+    # 验证确实发生了路由。
     has_routing = "next" in result1 or "next" in result2
 
     if has_routing:
@@ -292,13 +292,13 @@ def test_supervisor_routing():
 
 def test_api_routing_consistency():
     """
-    Test 6: Verify API server has same routing as Studio.
+    测试 6：验证 API 服务与 Studio 使用一致的路由。
     """
     print("\n" + "="*60)
     print("TEST 6: API Routing Consistency")
     print("="*60)
 
-    # Import both the multi-agent graph and individual graphs
+    # 同时导入多智能体图和各个独立图。
     from api.server import multi_agent_graph, business_graph, database_graph
 
     print("\n✓ Multi-agent graph (automatic routing) imported")
@@ -318,9 +318,9 @@ def test_api_routing_consistency():
 
 def run_all_tests():
     """
-    Run all tests to verify the implementation.
+    运行全部测试以验证实现。
     """
-    # Check for OPENAI_API_KEY
+    # 检查 OPENAI_API_KEY。
     if not os.getenv("OPENAI_API_KEY"):
         print("\n" + "="*60)
         print("⚠️  WARNING: OPENAI_API_KEY not set")
@@ -355,7 +355,7 @@ def run_all_tests():
             print(f"\n✗ ERROR in {test_name}: {e}")
             results.append((test_name, "ERROR"))
 
-    # Print summary
+    # 打印汇总。
     print("\n" + "="*60)
     print("TEST SUMMARY")
     print("="*60)
