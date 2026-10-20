@@ -1,10 +1,11 @@
-# 多智能体 AI 求职与面试助手
+# CareerGraph-AI
 
-这是一个面向 AI 应用开发岗位的 LangGraph 多智能体项目。用户可以通过 FastAPI
-提交求职、面试或求职申请数据问题，由 Supervisor 选择业务 Agent 或数据库 Agent，
-并使用独立的检查点数据库保存多轮会话状态。
+CareerGraph-AI 是一个面向 AI 应用开发岗位的求职与面试多智能体助手。项目基于开源
+LangGraph 多智能体项目进行二次开发，把演示型多 Agent 流程重构为可运行的求职业务
+后端：FastAPI 接入、Supervisor 路由、真实 RAG 检索、只读业务数据查询，以及可选的
+MySQL 多轮会话持久化。
 
-项目当前聚焦以下能力：
+P0 阶段已完成以下能力：
 
 - Supervisor 自动路由，以及调用方指定 Agent 的手动路由。
 - Business Agent 使用 Chroma 本地向量索引和 Ollama embedding 做真实 RAG 检索。
@@ -12,6 +13,15 @@
 - FastAPI 提供普通响应、SSE 流式响应、会话历史查询和会话删除。
 - LangGraph Checkpointer 支持内存模式与 MySQL 模式。
 - checkpoint 数据与业务数据使用不同的数据库配置和数据库账号。
+
+## 项目定位
+
+CareerGraph-AI 把多智能体结构落到求职场景，而不是停留在通用聊天演示：
+
+- 知识回答必须经过本地知识库检索，并在回答中标注来源。
+- 申请数据查询只走固定参数化工具，不执行模型生成的原始 SQL。
+- 会话 checkpoint 与求职业务数据分库、分账号保存。
+- 确定性测试覆盖图结构、路由降级、RAG 契约和工具参数化，真实模型与数据库通过独立集成测试验收。
 
 ## 架构
 
